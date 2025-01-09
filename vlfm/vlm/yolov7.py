@@ -30,7 +30,7 @@ sys.path.pop(0)
 class YOLOv7:
     def __init__(self, weights: str, image_size: int = 640, half_precision: bool = True):
         """Loads the model and saves it to a field."""
-        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.device = torch.device("cpu") if torch.cuda.is_available() else torch.device("cpu")
         self.half_precision = self.device.type != "cpu" and half_precision
         self.model = attempt_load(weights, map_location=self.device)  # load FP32 model
         stride = int(self.model.stride.max())  # model stride

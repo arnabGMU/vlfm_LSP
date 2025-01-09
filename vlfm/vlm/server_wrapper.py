@@ -126,14 +126,13 @@ def _send_request(url: str, **kwargs: Any) -> dict:
                 payload[k] = image_to_str(v, quality=kwargs.get("quality", 90))
             else:
                 payload[k] = v
-
         # Set the headers
         headers = {"Content-Type": "application/json"}
 
         start_time = time.time()
         while True:
             try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=1)
+                resp = requests.post(url, headers=headers, json=payload, timeout=100)
                 if resp.status_code == 200:
                     result = resp.json()
                     break

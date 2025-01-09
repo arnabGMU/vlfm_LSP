@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from hydra.core.config_store import ConfigStore
 from torch import Tensor
+import sys
 
 from vlfm.mapping.object_point_cloud_map import ObjectPointCloudMap
 from vlfm.mapping.obstacle_map import ObstacleMap
@@ -90,6 +91,7 @@ class BaseObjectNavPolicy(BasePolicy):
                 agent_radius=agent_radius,
                 hole_area_thresh=hole_area_thresh,
             )
+        
 
     def _reset(self) -> None:
         self._target_object = ""
@@ -252,6 +254,7 @@ class BaseObjectNavPolicy(BasePolicy):
             stop (bool): Whether to stop if we are close enough to the goal.
 
         """
+        
         masks = torch.tensor([self._num_steps != 0], dtype=torch.bool, device="cuda")
         if not np.array_equal(goal, self._last_goal):
             if np.linalg.norm(goal - self._last_goal) > 0.1:

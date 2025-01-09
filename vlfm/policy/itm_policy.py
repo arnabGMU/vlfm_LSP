@@ -6,14 +6,19 @@ from typing import Any, Dict, List, Tuple, Union
 import cv2
 import numpy as np
 from torch import Tensor
+import sys
+import networkx as nx
 
 from vlfm.mapping.frontier_map import FrontierMap
 from vlfm.mapping.value_map import ValueMap
 from vlfm.policy.base_objectnav_policy import BaseObjectNavPolicy
 from vlfm.policy.utils.acyclic_enforcer import AcyclicEnforcer
+from vlfm.policy.lsp import get_lowest_cost_ordering, Frontier_LSP
 from vlfm.utils.geometry_utils import closest_point_within_threshold
+from vlfm.utils.img_utils import crop_white_border, resize_images
 from vlfm.vlm.blip2itm import BLIP2ITMClient
 from vlfm.vlm.detections import ObjectDetections
+from matplotlib import pyplot as plt
 
 try:
     from habitat_baselines.common.tensor_dict import TensorDict
@@ -21,7 +26,7 @@ except Exception:
     pass
 
 PROMPT_SEPARATOR = "|"
-
+EPISODE = 0
 
 class BaseITMPolicy(BaseObjectNavPolicy):
     _target_object_color: Tuple[int, int, int] = (0, 255, 0)
@@ -53,6 +58,12 @@ class BaseITMPolicy(BaseObjectNavPolicy):
             obstacle_map=self._obstacle_map if sync_explored_areas else None,
         )
         self._acyclic_enforcer = AcyclicEnforcer()
+        self.LSP = True
+        self.navigable_map_LSP = None
+        self.navigable_nodes_LSP = None
+        self.navigable_graph_LSP = None
+
+        self.episode = 2
 
     def _reset(self) -> None:
         super()._reset()
@@ -61,22 +72,29 @@ class BaseITMPolicy(BaseObjectNavPolicy):
         self._last_value = float("-inf")
         self._last_frontier = np.zeros(2)
 
+        self.navigable_map_LSP = None
+        self.navigable_nodes_LSP = None
+        self.navigable_graph_LSP = None
+
     def _explore(self, observations: Union[Dict[str, Tensor], "TensorDict"]) -> Tensor:
         frontiers = self._observations_cache["frontier_sensor"]
         if np.array_equal(frontiers, np.zeros((1, 2))) or len(frontiers) == 0:
             print("No frontiers found during exploration, stopping.")
             return self._stop_action
-        best_frontier, best_value = self._get_best_frontier(observations, frontiers)
+        best_frontier, best_value = self._get_best_frontier(observations, frontiers, LSP=self.LSP)
         os.environ["DEBUG_INFO"] = f"Best value: {best_value*100:.2f}%"
         print(f"Best value: {best_value*100:.2f}%")
+
         pointnav_action = self._pointnav(best_frontier, stop=False)
 
         return pointnav_action
+
 
     def _get_best_frontier(
         self,
         observations: Union[Dict[str, Tensor], "TensorDict"],
         frontiers: np.ndarray,
+        LSP=False
     ) -> Tuple[np.ndarray, float]:
         """Returns the best frontier and its value based on self._value_map.
 
@@ -123,16 +141,39 @@ class BaseITMPolicy(BaseObjectNavPolicy):
                     os.environ["DEBUG_INFO"] += "Sticking to last point. "
                     best_frontier_idx = curr_index
 
+        
+
         # If there is no last point pursued, then just take the best point, given that
         # it is not cyclic.
         if best_frontier_idx is None:
-            for idx, frontier in enumerate(sorted_pts):
-                cyclic = self._acyclic_enforcer.check_cyclic(robot_xy, frontier, top_two_values)
-                if cyclic:
-                    print("Suppressed cyclic frontier.")
-                    continue
-                best_frontier_idx = idx
-                break
+            if LSP:
+                cost, ordering = self._get_best_frontier_lsp(sorted_pts, sorted_values, robot_xy)
+                best_frontier_LSP = ordering[0]
+                
+                for frontier_LSP in ordering:
+                    frontier = self._value_map._px_to_xy(frontier_LSP.centroid.reshape(1,2))[0]
+                    frontier_value = frontier_LSP.prob_feasible
+                    
+                    cyclic = self._acyclic_enforcer.check_cyclic(robot_xy, frontier, top_two_values)
+                    if cyclic:
+                        print("Suppressed cyclic frontier. LSP")
+                        continue
+                    best_frontier = frontier
+                    best_value = frontier_value
+                    self._acyclic_enforcer.add_state_action(robot_xy, best_frontier, top_two_values)
+                    self._last_value = best_value
+                    self._last_frontier = best_frontier
+                    os.environ["DEBUG_INFO"] += f" Best value: {best_value*100:.2f}%"
+
+                    return best_frontier, best_value
+            else:
+                for idx, frontier in enumerate(sorted_pts):
+                    cyclic = self._acyclic_enforcer.check_cyclic(robot_xy, frontier, top_two_values)
+                    if cyclic:
+                        print("Suppressed cyclic frontier.")
+                        continue
+                    best_frontier_idx = idx
+                    break
 
         if best_frontier_idx is None:
             print("All frontiers are cyclic. Just choosing the closest one.")
@@ -150,6 +191,143 @@ class BaseITMPolicy(BaseObjectNavPolicy):
         os.environ["DEBUG_INFO"] += f" Best value: {best_value*100:.2f}%"
 
         return best_frontier, best_value
+    
+    def _get_best_frontier_lsp(self, frontiers, values, robot_xy):
+        frontiers_px = self._value_map._xy_to_px(frontiers)
+        print("frontiers", frontiers)
+        print("frontiers_px", frontiers_px)
+        robot_px = tuple(self._value_map._xy_to_px(robot_xy.reshape(1,2))[0])
+        print("robot_xy", robot_xy)
+        print("robot_px", robot_px)
+        if self._last_frontier is not None:
+            last_frontier_px = self._value_map._xy_to_px(self._last_frontier.reshape(1,2))[0]
+
+        subgoals = []
+        for frontier, prob in zip(frontiers_px, values):
+            frontier_lsp = Frontier_LSP(frontier)
+            frontier_lsp.set_props(prob)
+
+            if self._last_frontier is not None and tuple(last_frontier_px) == tuple(frontier):
+                frontier_lsp.is_from_last_chosen = True 
+            subgoals.append(frontier_lsp)
+        
+        # Calculate robot-frontier and frontier-frontier distances
+        distances = self._calculate_distances_LSP(subgoals, robot_px)
+        cost, ordering = get_lowest_cost_ordering(subgoals, distances)
+        print("lsp cost", cost)
+        print("ordering", ordering)
+        return cost, ordering
+
+    def _add_edges_to_graph(self, graph, grid, nodes):
+        grid_max_x, grid_max_y = grid.shape
+        for node in nodes:
+            i = node[0]
+            j = node[1]
+            if i+1 < grid_max_x and grid[i + 1][j] == 1:
+                graph.add_edge((i, j), (i + 1, j), weight=1)
+            if j+1 < grid_max_y and grid[i][j + 1] == 1:
+                graph.add_edge((i, j), (i, j + 1), weight=1)
+            if i+1 < grid_max_x and j+1 < grid_max_y and grid[i+1][j+1] == 1:
+                graph.add_edge((i, j), (i+1, j+1), weight=1.41)
+            if 0 <= i-1 and 0 <= j-1 and grid[i-1][j-1] == 1:
+                graph.add_edge((i,j), (i-1,j-1), weight=1.41)
+
+    def _update_navigable_graph_LSP(self):
+        if self.navigable_graph_LSP is None:
+            self.navigable_map_LSP = self._obstacle_map._navigable_map.astype(np.uint8).copy()
+            self.navigable_nodes_LSP = list(map(tuple, np.transpose(np.where(self.navigable_map_LSP==1))))
+            cv2.imshow("navigable map", self._obstacle_map._navigable_map)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+            print("nodes", self.navigable_map_LSP)
+            print(len(self.navigable_nodes_LSP))
+            
+            self.navigable_graph_LSP = nx.Graph()
+            self.navigable_graph_LSP.add_nodes_from(self.navigable_nodes_LSP)
+            self._add_edges_to_graph(self.navigable_graph_LSP, self.navigable_map_LSP, self.navigable_nodes_LSP)
+        
+        else:
+            current_nav_map = self._obstacle_map._navigable_map.astype(np.uint8).copy()
+            new_nav_nodes = list(map(tuple, np.transpose(np.where(np.logical_and(current_nav_map==1, current_nav_map != self.navigable_map_LSP)==1))))
+            plt.figure()
+            plt.imshow(current_nav_map);plt.show()
+            plt.imshow(np.logical_and(current_nav_map==1, current_nav_map != self.navigable_map_LSP)==1);plt.show()
+            #print("new nodes", new_nav_nodes)
+
+            self.navigable_graph_LSP.add_nodes_from(new_nav_nodes)
+            self._add_edges_to_graph(self.navigable_graph_LSP, current_nav_map, new_nav_nodes)
+
+            self.navigable_map_LSP = current_nav_map
+
+    def _calculate_distances_LSP(self, frontiers_LSP, robot_px):
+        self._update_navigable_graph_LSP()
+        distances = {'goal': {}, 'robot': {}, 'frontier': {}}
+        for i in range(len(frontiers_LSP)):
+            frontier = frontiers_LSP[i]
+            distances['goal'][frontier] = 0
+            distances['robot'][frontier] = nx.shortest_path_length(self.navigable_graph_LSP, \
+                                                                   robot_px, \
+                                                                    tuple(frontier.centroid)) / self._value_map.pixels_per_meter
+            for j in range(i+1, len(frontiers_LSP)):
+                frontier2 = frontiers_LSP[j]
+                distances['frontier'][frozenset([frontier, frontier2])] = nx.shortest_path_length(self.navigable_graph_LSP, \
+                                                                                                tuple(frontier.centroid), \
+                                                                                                    tuple(frontier2.centroid)) / self._value_map.pixels_per_meter
+        return distances
+    
+    def save_figure(self):
+        policy_info = {}
+        markers = []
+
+        # Draw frontiers on to the cost map
+        frontiers = self._observations_cache["frontier_sensor"]
+        if not(np.array_equal(frontiers, np.zeros((1, 2))) or len(frontiers) == 0):
+
+            for i, frontier in enumerate(frontiers):
+                marker_kwargs = {
+                    "radius": self._circle_marker_radius,
+                    "thickness": self._circle_marker_thickness,
+                    "color": self._frontier_color,
+                }
+                markers.append((frontier[:2], marker_kwargs))
+
+            if not np.array_equal(self._last_goal, np.zeros(2)):
+                # Draw the pointnav goal on to the cost map
+                if any(np.array_equal(self._last_goal, frontier) for frontier in frontiers):
+                    color = self._selected__frontier_color
+                else:
+                    color = self._target_object_color
+                marker_kwargs = {
+                    "radius": 7,
+                    "thickness": self._circle_marker_thickness,
+                    "color": color,
+                }
+                markers.append((self._last_goal, marker_kwargs))
+
+        policy_info["value_map"] = cv2.cvtColor(
+            self._value_map.visualize(markers, reduce_fn=self._vis_reduce_fn),
+            cv2.COLOR_BGR2RGB,
+        )
+        policy_info["value_map"] = crop_white_border(policy_info["value_map"])
+        policy_info["obstacle_map"] = cv2.cvtColor(self._obstacle_map.visualize(), cv2.COLOR_BGR2RGB)
+        policy_info["obstacle_map"] = crop_white_border(policy_info["obstacle_map"])
+
+        #rgb_canvas = np.zeros(policy_info["obstacle_map"].shape)
+        rgb = cv2.cvtColor(self._observations_cache["object_map_rgbd"][0][0], cv2.COLOR_BGR2RGB)
+        # rgb_canvas[rgb_canvas.shape[0]//2 - rgb.shape[0] // 2: rgb_canvas.shape[0]//2 + rgb.shape[0] // 2, \
+        #            rgb_canvas.shape[1]//2 - rgb.shape[1] // 2:rgb_canvas.shape[1]//2 + rgb.shape[1] // 2, :] = rgb
+
+        resized_images = resize_images([rgb, policy_info['obstacle_map'], policy_info["value_map"]])
+        #image_horizontal = np.concatenate((rgb_canvas, policy_info['obstacle_map'], policy_info["value_map"]), axis=1)
+        image_horizontal = np.concatenate(resized_images, axis=1)
+        if self.LSP:
+            path = f"./figures/LSP/{self.episode}"
+        else:
+            path = f"./figures/{self.episode}"
+        if not os.path.exists(path):
+            os.mkdir(path) 
+        path = f'{path}/{self._num_steps}.png'       
+        cv2.imwrite(path, image_horizontal)
 
     def _get_policy_info(self, detections: ObjectDetections) -> Dict[str, Any]:
         policy_info = super()._get_policy_info(detections)
@@ -232,6 +410,7 @@ class ITMPolicy(BaseITMPolicy):
         self._pre_step(observations, masks)
         if self._visualize:
             self._update_value_map()
+        
         return super().act(observations, rnn_hidden_states, prev_actions, masks, deterministic)
 
     def _reset(self) -> None:
@@ -258,6 +437,9 @@ class ITMPolicyV2(BaseITMPolicy):
     ) -> Any:
         self._pre_step(observations, masks)
         self._update_value_map()
+        self.save_figure()
+        #detections = self._get_object_detections(rgb)
+        #sys.exit()
         return super().act(observations, rnn_hidden_states, prev_actions, masks, deterministic)
 
     def _sort_frontiers_by_value(

@@ -28,7 +28,7 @@ class GroundingDINO:
         caption: str = CLASSES,
         box_threshold: float = 0.35,
         text_threshold: float = 0.25,
-        device: torch.device = torch.device("cuda"),
+        device: torch.device = torch.device("cpu"),
     ):
         self.model = load_model(model_config_path=config_path, model_checkpoint_path=weights_path).to(device)
         self.caption = caption

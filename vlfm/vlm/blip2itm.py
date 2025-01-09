@@ -24,7 +24,7 @@ class BLIP2ITM:
         device: Optional[Any] = None,
     ) -> None:
         if device is None:
-            device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
+            device = torch.device("cpu") if torch.cuda.is_available() else "cpu"
 
         self.model, self.vis_processors, self.text_processors = load_model_and_preprocess(
             name=name,
@@ -50,6 +50,7 @@ class BLIP2ITM:
         txt = self.text_processors["eval"](txt)
         with torch.inference_mode():
             cosine = self.model({"image": img, "text_input": txt}, match_head="itc").item()
+            print(cosine)
 
         return cosine
 
@@ -75,6 +76,7 @@ if __name__ == "__main__":
 
     class BLIP2ITMServer(ServerMixin, BLIP2ITM):
         def process_payload(self, payload: dict) -> dict:
+            print("server")
             image = str_to_image(payload["image"])
             return {"response": self.cosine(image, payload["txt"])}
 

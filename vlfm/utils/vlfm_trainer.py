@@ -3,6 +3,7 @@
 import os
 from collections import defaultdict
 from typing import Any, Dict, List
+import sys
 
 import numpy as np
 import torch
@@ -71,7 +72,7 @@ class VLFMTrainer(PPOTrainer):
             # map_location="cpu" is almost always better than mapping to a CUDA device.
             ckpt_dict = self.load_checkpoint(checkpoint_path, map_location="cpu")
             step_id = ckpt_dict["extra_state"]["step"]
-            print(step_id)
+            print("step id", step_id)
         else:
             ckpt_dict = {"config": None}
 
@@ -95,9 +96,9 @@ class VLFMTrainer(PPOTrainer):
 
         if config.habitat_baselines.verbose:
             logger.info(f"env config: {OmegaConf.to_yaml(config)}")
-
+        
         self._init_envs(config, is_eval=True)
-
+        
         self._agent = self._create_agent(None)
         action_shape, discrete_actions = get_action_space_info(self._agent.policy_action_space)
 
@@ -105,6 +106,9 @@ class VLFMTrainer(PPOTrainer):
             self._agent.load_state_dict(ckpt_dict)
 
         observations = self.envs.reset()
+        observations = self.envs.reset()
+        observations = self.envs.reset()
+
         batch = batch_obs(observations, device=self.device)
         batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
 
@@ -161,8 +165,11 @@ class VLFMTrainer(PPOTrainer):
         num_successes = 0
         num_total = 0
         hab_vis = HabitatVis()
+
+        print("current episode info", self.envs.current_episodes())
         while len(stats_episodes) < (number_of_eval_episodes * evals_per_ep) and self.envs.num_envs > 0:
             current_episodes_info = self.envs.current_episodes()
+            
 
             with inference_mode():
                 action_data = self._agent.actor_critic.act(
@@ -211,6 +218,8 @@ class VLFMTrainer(PPOTrainer):
             outputs = self.envs.step(step_data)
 
             observations, rewards_l, dones, infos = [list(x) for x in zip(*outputs)]
+            # if self._agent.actor_critic.episode != 2:
+            #     dones = [True]
             policy_infos = self._agent.actor_critic.get_extra(action_data, infos, dones)
             for i in range(len(policy_infos)):
                 infos[i].update(policy_infos[i])
@@ -219,7 +228,7 @@ class VLFMTrainer(PPOTrainer):
                 device=self.device,
             )
             batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
-
+            
             not_done_masks = torch.tensor(
                 [[not done] for done in dones],
                 dtype=torch.bool,
@@ -231,6 +240,7 @@ class VLFMTrainer(PPOTrainer):
             next_episodes_info = self.envs.current_episodes()
             envs_to_pause = []
             n_envs = self.envs.num_envs
+
             for i in range(n_envs):
                 if (
                     ep_eval_count[
@@ -250,8 +260,10 @@ class VLFMTrainer(PPOTrainer):
 
                 # episode ended
                 if not not_done_masks[i].item():
+                    self._agent.actor_critic.episode += 1
                     pbar.update()
                     episode_stats = {"reward": current_episode_reward[i].item()}
+                    
                     episode_stats.update(extract_scalars_from_info(infos[i]))
                     current_episode_reward[i] = 0
                     k = (

@@ -18,6 +18,7 @@ from habitat_baselines.run import execute_exp
 from hydra.core.config_search_path import ConfigSearchPath
 from hydra.plugins.search_path_plugin import SearchPathPlugin
 from omegaconf import DictConfig
+import sys
 
 import vlfm.measurements.traveled_stairs  # noqa: F401
 import vlfm.obs_transformers.resize  # noqa: F401
@@ -45,8 +46,9 @@ def main(cfg: DictConfig) -> None:
         print("Dummy policy weights not found! Please run the following command first:")
         print("python -m vlfm.utils.generate_dummy_policy")
         exit(1)
-
+    
     cfg = patch_config(cfg)
+    
     with read_write(cfg):
         try:
             cfg.habitat.simulator.agents.main_agent.sim_sensors.pop("semantic_sensor")
