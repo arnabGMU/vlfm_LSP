@@ -106,8 +106,12 @@ class VLFMTrainer(PPOTrainer):
             self._agent.load_state_dict(ckpt_dict)
 
         observations = self.envs.reset()
-        observations = self.envs.reset()
-        observations = self.envs.reset()
+        
+        # SKIP EPISODE FOR DEBUGGING
+        #skip_episode = 1009 + 20
+        skip_episode = 0
+        for i in range(skip_episode):
+            observations = self.envs.reset()
 
         batch = batch_obs(observations, device=self.device)
         batch = apply_obs_transforms_batch(batch, self.obs_transforms)  # type: ignore
@@ -166,10 +170,14 @@ class VLFMTrainer(PPOTrainer):
         num_total = 0
         hab_vis = HabitatVis()
 
-        print("current episode info", self.envs.current_episodes())
+        
+        
+        write = True
+        if write:
+            out_file = open(f'outputs/vlfm_lsp_itm.txt', 'w')
+
         while len(stats_episodes) < (number_of_eval_episodes * evals_per_ep) and self.envs.num_envs > 0:
             current_episodes_info = self.envs.current_episodes()
-            
 
             with inference_mode():
                 action_data = self._agent.actor_critic.act(
@@ -218,8 +226,7 @@ class VLFMTrainer(PPOTrainer):
             outputs = self.envs.step(step_data)
 
             observations, rewards_l, dones, infos = [list(x) for x in zip(*outputs)]
-            # if self._agent.actor_critic.episode != 2:
-            #     dones = [True]
+            #print("infos", infos)
             policy_infos = self._agent.actor_critic.get_extra(action_data, infos, dones)
             for i in range(len(policy_infos)):
                 infos[i].update(policy_infos[i])
@@ -277,6 +284,8 @@ class VLFMTrainer(PPOTrainer):
                     if episode_stats["success"] == 1:
                         num_successes += 1
                     num_total += 1
+
+                    print(f"current episode info:  {current_episodes_info}")
                     print(f"Success rate: {num_successes / num_total * 100:.2f}% ({num_successes} out of {num_total})")
 
                     from vlfm.utils.episode_stats_logger import (
@@ -291,6 +300,18 @@ class VLFMTrainer(PPOTrainer):
                         )
                     except Exception:
                         failure_cause = "Unknown"
+
+                    if write == True:
+                        out_file.write(f'Episode: {self._agent.actor_critic.episode}\n')
+                        out_file.write(f"current episode info:  {current_episodes_info}\n")
+                        out_file.write(f'Success: {episode_stats["success"]}\n')
+                        out_file.write(f'SPL: {episode_stats["spl"]}\n')
+                        out_file.write(f'Soft SPL: {episode_stats["soft_spl"]}\n')
+
+                        out_file.write(f'no of steps: {self._agent.actor_critic._num_steps}\n')
+                        out_file.write(f'Failure cause: {failure_cause}\n')
+                        out_file.write(f'Debug needed: {self._agent.actor_critic.debug_needed}\n\n')
+                        out_file.flush()
 
                     if len(self.config.habitat_baselines.eval.video_option) > 0:
                         rgb_frames[i] = hab_vis.flush_frames(failure_cause)
@@ -355,6 +376,8 @@ class VLFMTrainer(PPOTrainer):
 
         for k, v in aggregated_stats.items():
             logger.info(f"Average episode {k}: {v:.4f}")
+            if write:
+                out_file.write(f"Average episode {k}: {v:.4f}\n")
 
         step_id = checkpoint_index
         if "extra_state" in ckpt_dict and "step" in ckpt_dict["extra_state"]:
@@ -367,3 +390,4 @@ class VLFMTrainer(PPOTrainer):
             writer.add_scalar(f"eval_metrics/{k}", v, step_id)
 
         self.envs.close()
+        out_file.close()

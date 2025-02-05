@@ -138,6 +138,14 @@ class BaseObjectNavPolicy(BasePolicy):
         else:
             mode = "navigate"
             pointnav_action = self._pointnav(goal[:2], stop=True)
+        
+        # new code
+        # frontiers = self._observations_cache["frontier_sensor"]
+        # if np.array_equal(frontiers, np.zeros((1, 2))) or len(frontiers) == 0:
+        #     print("No frontiers found during exploration, stopping.")
+        # else:
+        #     self.save_figure(observations, frontiers)
+
 
         action_numpy = pointnav_action.detach().cpu().numpy()[0]
         if len(action_numpy) == 1:

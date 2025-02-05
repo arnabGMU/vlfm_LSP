@@ -24,7 +24,7 @@ class BLIP2ITM:
         device: Optional[Any] = None,
     ) -> None:
         if device is None:
-            device = torch.device("cpu") if torch.cuda.is_available() else "cpu"
+            device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
 
         self.model, self.vis_processors, self.text_processors = load_model_and_preprocess(
             name=name,
@@ -53,6 +53,31 @@ class BLIP2ITM:
             print(cosine)
 
         return cosine
+    
+    def probability(self, image: np.ndarray, txt: str) -> float:
+        """
+        Compute the cosine similarity between the image and the prompt.
+
+        Args:
+            image (numpy.ndarray): The input image as a numpy array.
+            txt (str): The text to compare the image to.
+
+        Returns:
+            float: The cosine similarity between the image and the prompt.
+        """
+        pil_img = Image.fromarray(image)
+        img = self.vis_processors["eval"](pil_img).unsqueeze(0).to(self.device)
+        txt = self.text_processors["eval"](txt)
+        with torch.inference_mode():
+            cosine = self.model({"image": img, "text_input": txt}, match_head="itc").item()
+            #print("cosine", cosine)
+
+            itm_output = self.model({"image": img, "text_input": txt}, match_head="itm")
+            itm_scores = torch.nn.functional.softmax(itm_output, dim=1)
+            print(itm_scores[:,1].item())
+            print(f'The image and text are matched with a probability of {itm_scores[:, 1].item():.3%}')
+
+        return itm_scores[:,1].item()
 
 
 class BLIP2ITMClient:
@@ -76,9 +101,10 @@ if __name__ == "__main__":
 
     class BLIP2ITMServer(ServerMixin, BLIP2ITM):
         def process_payload(self, payload: dict) -> dict:
-            print("server")
             image = str_to_image(payload["image"])
-            return {"response": self.cosine(image, payload["txt"])}
+            #self.probability(image, payload["txt"])
+            #return {"response": self.cosine(image, payload["txt"])}
+            return {"response": self.probability(image, payload["txt"])}
 
     blip = BLIP2ITMServer()
     print("Model loaded!")
